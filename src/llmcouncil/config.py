@@ -72,6 +72,7 @@ class MemoryConfig(BaseModel):
     enabled: bool = True
     retention_policy: Literal["summarize_after_30d", "keep_forever", "delete_after_30d"] = "summarize_after_30d"
     max_summary_tokens: int = 2000
+    embedding_model: str = "openai/text-embedding-3-small"
 
 
 class DefaultLLMConfig(BaseModel):

@@ -78,6 +78,21 @@ class Verdict(Base):
     created_at = Column(DateTime, nullable=False)
 
 
+class Memory(Base):
+    __tablename__ = "memories"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(String, ForeignKey("sessions.id"), nullable=True)
+    summary_text = Column(Text, nullable=False)
+    embedding_json = Column(Text, nullable=True)   # JSON list[float]
+    topic = Column(String, nullable=True)
+    entities_json = Column(Text, nullable=True)
+    decisions_json = Column(Text, nullable=True)
+    open_threads_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False)
+    expires_at = Column(DateTime, nullable=True)
+
+
 class CostLedger(Base):
     __tablename__ = "cost_ledger"
 
