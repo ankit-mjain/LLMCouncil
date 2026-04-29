@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# uv / venv
+.venv/
+.uv/
+
+# IDE
+.vscode/
+.idea/
+
+# Secrets — never commit these
+*.age
+age.key
+secrets.*
+.env
+*.env
+
+# DB
+*.sqlite
+*.sqlite-journal
+
+# Logs
+*.log
+*.jsonl
+
+# mypy / ruff caches
+.mypy_cache/
+.ruff_cache/
+
+# pytest
+.pytest_cache/
