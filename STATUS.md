@@ -4,7 +4,7 @@
 
 ---
 
-## Current milestone: M3 (not started)
+## Current milestone: M4 (not started)
 
 ---
 
@@ -15,13 +15,37 @@
 | **M0** | Repo scaffold, `pyproject.toml`, CI, config schema, vault adapter | **DONE** | `llmcouncil --help` works; secrets round-trip through age vault |
 | **M1** | Single-LLM responder (LiteLLM); basic Telegram bot; cost ledger | **SKIPPED → folded into M3** | Send a message in Telegram, get an answer; cost recorded |
 | **M2** | Setup wizard (all 16 sections); cost-profile presets; config.toml round-trip | **DONE** | Wizard produces valid config; reload works; `cheap` preset in < 5 min |
-| **M3** | Council orchestrator (fixed protocol, 3 seats, simple majority); transcript persistence; verdict synthesis | **TODO** | `/Council` produces a verdict; transcript stored |
+| **M3** | Council orchestrator (fixed protocol, 3 seats, simple majority); transcript persistence; verdict synthesis | **DONE** | `/Council` produces a verdict; transcript stored |
 | **M4** | Voting variants, tie-break flows, Devil's Advocate, weighted/ranked | **TODO** | All voting mechanisms covered by tests |
 | **M5** | Web search tool; cross-conversation memory; auto-escalation | **TODO** | Memory recall + escalation observable in TUI |
 | **M6** | TUI dashboard (live + history) | **TODO** | Live streaming visible during a council session |
 | **M7** | Telegram streaming; markdown/rich formats; budget enforcement; failure modes | **TODO** | All §19 failures handled; budgets enforced |
 | **M8** | Hardening: structured logs, security review, docs; validation harness active | **TODO** | Security review passed; README; first 30 days of validation data |
 | **M9** | v1 → v2 pivot trigger met; begin CSV pipeline spec | **TODO** | v2.0 spec drafted and approved |
+
+---
+
+## M3 — completed 2026-04-29
+
+### What was built
+
+| File | Purpose |
+|---|---|
+| `src/llmcouncil/council/orchestrator.py` | LangGraph `StateGraph` — fixed protocol: Propose → Critique → check termination (unanimity / round-cap) → [Revise]* → Vote → Synthesize |
+| `src/llmcouncil/council/llm_adapter.py` | `call_seat()` — async LiteLLM wrapper with latency + cost tracking |
+| `src/llmcouncil/council/voting.py` | `simple_majority()` with confidence tie-break; `straw_poll_unanimous()` |
+| `src/llmcouncil/council/synthesizer.py` | `render_verdict()` — §11.5 template (Verdict / Council notes / Minority view) |
+| `src/llmcouncil/persistence/models.py` | SQLAlchemy models: `sessions`, `seats_snapshot`, `transcript_entries`, `votes`, `verdicts`, `cost_ledger` |
+| `src/llmcouncil/persistence/db.py` | `init_db()` — engine + `create_all` + session factory |
+| `src/llmcouncil/agent.py` | `single_shot()` (M1), `dispatch()` — routes `/Council` prefix to orchestrator |
+| `tests/unit/test_voting.py` | 7 tests — majority, tie-break, straw poll |
+| `tests/unit/test_persistence.py` | 5 tests — schema creation, round-trip for all tables |
+| `tests/unit/test_council_orchestrator.py` | 7 tests — unanimous early stop, round-cap, vote parse fallback, verdict template |
+
+### Test results
+```
+47 passed in 8.20s
+```
 
 ---
 
