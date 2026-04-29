@@ -4,7 +4,7 @@
 
 ---
 
-## Current milestone: M4 (not started)
+## Current milestone: M5 (not started)
 
 ---
 
@@ -16,12 +16,31 @@
 | **M1** | Single-LLM responder (LiteLLM); basic Telegram bot; cost ledger | **SKIPPED → folded into M3** | Send a message in Telegram, get an answer; cost recorded |
 | **M2** | Setup wizard (all 16 sections); cost-profile presets; config.toml round-trip | **DONE** | Wizard produces valid config; reload works; `cheap` preset in < 5 min |
 | **M3** | Council orchestrator (fixed protocol, 3 seats, simple majority); transcript persistence; verdict synthesis | **DONE** | `/Council` produces a verdict; transcript stored |
-| **M4** | Voting variants, tie-break flows, Devil's Advocate, weighted/ranked | **TODO** | All voting mechanisms covered by tests |
+| **M4** | Voting variants, tie-break flows, Devil's Advocate, weighted/ranked | **DONE** | All voting mechanisms covered by tests |
 | **M5** | Web search tool; cross-conversation memory; auto-escalation | **TODO** | Memory recall + escalation observable in TUI |
 | **M6** | TUI dashboard (live + history) | **TODO** | Live streaming visible during a council session |
 | **M7** | Telegram streaming; markdown/rich formats; budget enforcement; failure modes | **TODO** | All §19 failures handled; budgets enforced |
 | **M8** | Hardening: structured logs, security review, docs; validation harness active | **TODO** | Security review passed; README; first 30 days of validation data |
 | **M9** | v1 → v2 pivot trigger met; begin CSV pipeline spec | **TODO** | v2.0 spec drafted and approved |
+
+---
+
+## M4 — completed 2026-04-29
+
+### What was built
+
+| File | Purpose |
+|---|---|
+| `src/llmcouncil/config.py` | `SeatConfig.weight: float = 1.0` — per-seat weight for weighted voting |
+| `src/llmcouncil/council/voting.py` | `supermajority()`, `ranked_choice()` (instant-runoff), `weighted_vote()`; `VotePayload.rankings` field |
+| `src/llmcouncil/council/orchestrator.py` | Devil's Advocate runs in parallel with critics (`kind="dissent"`); `vote_node` skips for `judge_decides`; `synthesize_node` dispatches all mechanisms + tie-break paths; `_judge_decides()` and `_judge_breaks_tie()` helpers; `tie_break` field in `CouncilState` |
+| `tests/unit/test_voting.py` | 10 new tests — supermajority, ranked-choice (IRV), weighted, default-weight |
+| `tests/unit/test_council_orchestrator.py` | 4 new tests — DA dissent, judge_decides, tie_user_pending, judge tie-break |
+
+### Test results
+```
+60 passed in 7.22s
+```
 
 ---
 
