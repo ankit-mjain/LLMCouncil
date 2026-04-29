@@ -4,7 +4,7 @@
 
 ---
 
-## Current milestone: M5 (not started)
+## Current milestone: M6 (not started)
 
 ---
 
@@ -17,11 +17,34 @@
 | **M2** | Setup wizard (all 16 sections); cost-profile presets; config.toml round-trip | **DONE** | Wizard produces valid config; reload works; `cheap` preset in < 5 min |
 | **M3** | Council orchestrator (fixed protocol, 3 seats, simple majority); transcript persistence; verdict synthesis | **DONE** | `/Council` produces a verdict; transcript stored |
 | **M4** | Voting variants, tie-break flows, Devil's Advocate, weighted/ranked | **DONE** | All voting mechanisms covered by tests |
-| **M5** | Web search tool; cross-conversation memory; auto-escalation | **TODO** | Memory recall + escalation observable in TUI |
+| **M5** | Web search tool; cross-conversation memory; auto-escalation | **DONE** | Memory recall + escalation observable in TUI |
 | **M6** | TUI dashboard (live + history) | **TODO** | Live streaming visible during a council session |
 | **M7** | Telegram streaming; markdown/rich formats; budget enforcement; failure modes | **TODO** | All §19 failures handled; budgets enforced |
 | **M8** | Hardening: structured logs, security review, docs; validation harness active | **TODO** | Security review passed; README; first 30 days of validation data |
 | **M9** | v1 → v2 pivot trigger met; begin CSV pipeline spec | **TODO** | v2.0 spec drafted and approved |
+
+---
+
+## M5 — completed 2026-04-29
+
+### What was built
+
+| File | Purpose |
+|---|---|
+| `src/llmcouncil/tools/web_search.py` | `WebSearchTool` — Tavily adapter; rate-limited (`max_calls_per_session`); `reset_session()`; pluggable provider |
+| `src/llmcouncil/memory/store.py` | `MemoryStore` — LLM-written session summaries; cosine-similarity recall via LiteLLM embeddings stored as JSON BLOBs; `write_session_memory()`, `recall()`, `clear()`, `list_summaries()` |
+| `src/llmcouncil/persistence/models.py` | `Memory` SQLAlchemy model (`memories` table) — summary_text, embedding_json, topic, entities_json, decisions_json, open_threads_json |
+| `src/llmcouncil/agent.py` | `dispatch()` — confidence-based auto-escalation gate; `memory_context` param injected into query; `_parse_confidence()`, `_strip_confidence_footer()` helpers |
+| `src/llmcouncil/config.py` | `MemoryConfig.embedding_model` field (default `openai/text-embedding-3-small`) |
+| `src/llmcouncil/tui/app.py` | `CouncilTUI.notify()` / `get_notifications()` — escalation + memory recall observable in TUI |
+| `tests/unit/test_web_search.py` | 6 tests — disabled, rate-limit, reset, Tavily format, empty results, counter |
+| `tests/unit/test_memory.py` | 13 tests — cosine similarity, write/recall/clear/list round-trips |
+| `tests/unit/test_agent_escalation.py` | 11 tests — confidence parsing, high-confidence no-escalation, low-confidence escalation, disabled escalation, explicit trigger, memory context injection |
+
+### Test results
+```
+90 passed in 20.55s
+```
 
 ---
 
