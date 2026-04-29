@@ -28,6 +28,7 @@ class SeatConfig(BaseModel):
     role: Literal["proposer", "critic", "devils_advocate", "judge"]
     provider: str
     model: str
+    weight: float = 1.0
 
 
 class CouncilConfig(BaseModel):
