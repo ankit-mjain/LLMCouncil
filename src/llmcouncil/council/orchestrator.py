@@ -18,6 +18,21 @@ from langgraph.graph import StateGraph, END
 
 from llmcouncil.config import AppConfig
 from llmcouncil.council.llm_adapter import LLMResponse, call_seat
+from llmcouncil.tui.events import CouncilEvent
+from llmcouncil.tui.pubsub import EventBus
+
+# Module-level event bus — set by the TUI before starting a session.
+_active_bus: EventBus | None = None
+
+
+def set_event_bus(bus: EventBus | None) -> None:
+    global _active_bus
+    _active_bus = bus
+
+
+def _emit(session_id: str, kind: str, payload: dict[str, Any]) -> None:  # type: ignore[type-arg]
+    if _active_bus is not None:
+        _active_bus.emit(CouncilEvent(kind=kind, session_id=session_id, payload=payload))  # type: ignore[arg-type]
 from llmcouncil.council.synthesizer import render_verdict
 from llmcouncil.council.voting import (
     VotePayload,
@@ -270,8 +285,14 @@ async def propose_node(state: CouncilState) -> dict[str, Any]:
             },
         ]
 
+    _emit(state["session_id"], "round_change", {"round": round_idx})
     resp = await call_seat(seat["provider"], seat["model"], messages)
     entry = _make_entry(state["session_id"], round_idx, seat["seat_id"], "draft", resp.text, resp)
+    _emit(state["session_id"], "transcript_entry", {
+        "kind": "draft", "seat_id": seat["seat_id"], "round": round_idx,
+        "content": resp.text[:300],
+    })
+    _emit(state["session_id"], "cost_update", {"usd": resp.usd, "seat_id": seat["seat_id"]})
     return {"drafts": [resp.text], "transcript": [entry]}
 
 
@@ -338,6 +359,18 @@ async def critique_node(state: CouncilState) -> dict[str, Any]:
 
     round_critiques = [r[0] for r in critic_results]
     entries = [r[1] for r in critic_results] + [r[1] for r in da_results]
+
+    for seat, (text, entry) in zip(critics, critic_results):
+        _emit(state["session_id"], "transcript_entry", {
+            "kind": "critique", "seat_id": seat["seat_id"], "round": round_idx,
+            "content": text[:300],
+        })
+    for seat, (text, entry) in zip(da_seats, da_results):
+        _emit(state["session_id"], "transcript_entry", {
+            "kind": "dissent", "seat_id": seat["seat_id"], "round": round_idx,
+            "content": text[:300],
+        })
+
     return {"critiques": [round_critiques], "transcript": entries}
 
 
@@ -450,6 +483,14 @@ async def vote_node(state: CouncilState) -> dict[str, Any]:
     results = await asyncio.gather(*[vote_one(s) for s in state["seats"]])
     vote_dicts = [r[0] for r in results]
     entries = [r[1] for r in results]
+
+    for seat, (vote_dict, _) in zip(state["seats"], results):
+        _emit(state["session_id"], "transcript_entry", {
+            "kind": "vote", "seat_id": seat["seat_id"],
+            "round": len(state["drafts"]),
+            "content": f"choice={vote_dict['choice']} confidence={vote_dict.get('confidence', '?')}",
+        })
+
     return {"votes": vote_dicts, "transcript": entries}
 
 
@@ -468,6 +509,7 @@ async def synthesize_node(state: CouncilState) -> dict[str, Any]:
             "verdict",
             verdict_text,
         )
+        _emit(state["session_id"], "verdict", {"text": verdict_text, "mechanism": mechanism})
         return {
             "verdict_text": verdict_text,
             "minority_text": None,
@@ -548,6 +590,13 @@ async def synthesize_node(state: CouncilState) -> dict[str, Any]:
         "verdict",
         verdict_text,
     )
+    _emit(state["session_id"], "verdict", {
+        "text": verdict_text,
+        "mechanism": mechanism,
+        "winning_choice": winning_choice,
+        "winning_votes": winning_votes,
+        "total_votes": total_votes,
+    })
 
     return {
         **update,

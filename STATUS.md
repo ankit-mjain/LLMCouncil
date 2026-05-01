@@ -1,10 +1,10 @@
 # LLMCouncil — Project Status
 
-> Last updated: 2026-04-29
+> Last updated: 2026-05-01
 
 ---
 
-## Current milestone: M6 (not started)
+## Current milestone: M7 (not started)
 
 ---
 
@@ -18,10 +18,30 @@
 | **M3** | Council orchestrator (fixed protocol, 3 seats, simple majority); transcript persistence; verdict synthesis | **DONE** | `/Council` produces a verdict; transcript stored |
 | **M4** | Voting variants, tie-break flows, Devil's Advocate, weighted/ranked | **DONE** | All voting mechanisms covered by tests |
 | **M5** | Web search tool; cross-conversation memory; auto-escalation | **DONE** | Memory recall + escalation observable in TUI |
-| **M6** | TUI dashboard (live + history) | **TODO** | Live streaming visible during a council session |
+| **M6** | TUI dashboard (live + history) | **DONE** | Live streaming visible during a council session |
 | **M7** | Telegram streaming; markdown/rich formats; budget enforcement; failure modes | **TODO** | All §19 failures handled; budgets enforced |
 | **M8** | Hardening: structured logs, security review, docs; validation harness active | **TODO** | Security review passed; README; first 30 days of validation data |
 | **M9** | v1 → v2 pivot trigger met; begin CSV pipeline spec | **TODO** | v2.0 spec drafted and approved |
+
+---
+
+## M6 — completed 2026-05-01
+
+### What was built
+
+| File | Purpose |
+|---|---|
+| `src/llmcouncil/tui/events.py` | `CouncilEvent` dataclass + `EventKind` literal (`seat_status`, `transcript_entry`, `cost_update`, `round_change`, `verdict`, `notification`) |
+| `src/llmcouncil/tui/pubsub.py` | `EventBus` — asyncio.Queue wrapper; `emit()`, `get()`, `get_nowait()`, `drain()`, `size` |
+| `src/llmcouncil/tui/app.py` | Full Textual `App`: header, seats/cost panel, `RichLog` transcript, status bar, `Input` widget, key bindings (`q`/`c`/`m`/`s`), `_poll_events` interval, council worker |
+| `src/llmcouncil/council/orchestrator.py` | `set_event_bus()` / `_emit()` helpers; `_active_bus` module-level slot; emit `round_change`, `transcript_entry`, `cost_update`, `verdict` from each node |
+| `tests/unit/test_tui_events.py` | 9 tests — `CouncilEvent` defaults, `EventBus` emit/drain/size/get |
+| `tests/unit/test_tui_app.py` | 6 tests — TUI instantiation, orchestrator event emission, no-bus short-circuit |
+
+### Test results
+```
+105 passed in 26.36s
+```
 
 ---
 
