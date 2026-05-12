@@ -1,10 +1,10 @@
 # LLMCouncil — Project Status
 
-> Last updated: 2026-05-01
+> Last updated: 2026-05-12
 
 ---
 
-## Current milestone: M7 (not started)
+## Current milestone: M8 (not started)
 
 ---
 
@@ -19,9 +19,32 @@
 | **M4** | Voting variants, tie-break flows, Devil's Advocate, weighted/ranked | **DONE** | All voting mechanisms covered by tests |
 | **M5** | Web search tool; cross-conversation memory; auto-escalation | **DONE** | Memory recall + escalation observable in TUI |
 | **M6** | TUI dashboard (live + history) | **DONE** | Live streaming visible during a council session |
-| **M7** | Telegram streaming; markdown/rich formats; budget enforcement; failure modes | **TODO** | All §19 failures handled; budgets enforced |
+| **M7** | Telegram streaming; markdown/rich formats; budget enforcement; failure modes | **DONE** | All §19 failures handled; budgets enforced |
 | **M8** | Hardening: structured logs, security review, docs; validation harness active | **TODO** | Security review passed; README; first 30 days of validation data |
 | **M9** | v1 → v2 pivot trigger met; begin CSV pipeline spec | **TODO** | v2.0 spec drafted and approved |
+
+---
+
+## M7 — completed 2026-05-12
+
+### What was built
+
+| File | Purpose |
+|---|---|
+| `src/llmcouncil/council/budget.py` | `BudgetTracker` — pre-call spend check, `BudgetExceededError`, `record()`/`remaining` |
+| `src/llmcouncil/council/llm_adapter.py` | `SeatError`; retry once on 429/5xx with jitter; `_is_retryable()` helper |
+| `src/llmcouncil/council/orchestrator.py` | `_do_call()` budget-checked + hard-timeout wrapper; errored-seat paths in all nodes; all-seats-errored fallback verdict; early-abort short-circuit via `terminated_by` |
+| `src/llmcouncil/telegram/formatter.py` | `format_message()` — plain/markdown/rich; MarkdownV2 escaping; 4096-char chunking at paragraph/newline boundaries |
+| `src/llmcouncil/telegram/bot.py` | `CouncilBot` — long-poll, `/start` pairing, all §15 commands, live status message edited per round, verdict as separate message, reconnect with exponential backoff, pending verdict queue |
+| `tests/unit/test_budget.py` | 8 tests — check/record/remaining, boundary conditions, error message |
+| `tests/unit/test_failure_modes.py` | 9 tests — retryable detection, retry-once, seat error propagation, budget abort, all-votes-error fallback |
+| `tests/unit/test_telegram_formatter.py` | 14 tests — chunking, plain/markdown/rich output, MarkdownV2 escaping |
+| `tests/unit/test_telegram_bot.py` | 14 tests — authorization, pairing, command routing, concurrent session guard |
+
+### Test results
+```
+150 passed in 16.14s
+```
 
 ---
 
