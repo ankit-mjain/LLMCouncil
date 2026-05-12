@@ -17,12 +17,15 @@ import operator
 from langgraph.graph import StateGraph, END
 
 from llmcouncil.config import AppConfig
-from llmcouncil.council.llm_adapter import LLMResponse, call_seat
+from llmcouncil.council.budget import BudgetExceededError, BudgetTracker
+from llmcouncil.council.llm_adapter import LLMResponse, SeatError, call_seat
 from llmcouncil.tui.events import CouncilEvent
 from llmcouncil.tui.pubsub import EventBus
 
-# Module-level event bus — set by the TUI before starting a session.
+# Module-level slots — set before starting a session.
 _active_bus: EventBus | None = None
+_budget_tracker: BudgetTracker | None = None
+_hard_latency_s: int = 90
 
 
 def set_event_bus(bus: EventBus | None) -> None:
@@ -30,9 +33,17 @@ def set_event_bus(bus: EventBus | None) -> None:
     _active_bus = bus
 
 
+def set_budget_tracker(tracker: BudgetTracker | None, hard_latency_s: int = 90) -> None:
+    global _budget_tracker, _hard_latency_s
+    _budget_tracker = tracker
+    _hard_latency_s = hard_latency_s
+
+
 def _emit(session_id: str, kind: str, payload: dict[str, Any]) -> None:  # type: ignore[type-arg]
     if _active_bus is not None:
         _active_bus.emit(CouncilEvent(kind=kind, session_id=session_id, payload=payload))  # type: ignore[arg-type]
+
+
 from llmcouncil.council.synthesizer import render_verdict
 from llmcouncil.council.voting import (
     VotePayload,
@@ -51,21 +62,21 @@ from llmcouncil.council.voting import (
 class CouncilState(TypedDict):
     session_id: str
     query: str
-    seats: list[dict[str, Any]]      # serialized SeatConfigs
+    seats: list[dict[str, Any]]
     max_rounds: int
     include_minority: bool
     voting_mechanism: str
     tie_break: str
-    # Annotated[list, operator.add] → nodes return partial lists; LangGraph appends them.
     drafts: Annotated[list[str], operator.add]
-    critiques: Annotated[list[list[str]], operator.add]   # one list of texts per round
+    critiques: Annotated[list[list[str]], operator.add]
     transcript: Annotated[list[dict[str, Any]], operator.add]
     votes: Annotated[list[dict[str, Any]], operator.add]
+    errored_seats: Annotated[list[int], operator.add]
     verdict_text: str
     minority_text: str | None
     terminated_by: str
     error: str | None
-    route_decision: str              # "continue" | "vote" — read by the conditional edge
+    route_decision: str  # "continue" | "vote"
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +117,6 @@ def _parse_vote(text: str, valid_labels: list[str]) -> dict[str, Any]:
             }
         except (json.JSONDecodeError, ValueError):
             pass
-    # Fallback: pick the first label mentioned in the text.
     for label in reversed(valid_labels):
         if label in text:
             return {"choice": label, "confidence": 0.7, "rationale": text[:200], "concerns": []}
@@ -114,7 +124,6 @@ def _parse_vote(text: str, valid_labels: list[str]) -> dict[str, Any]:
 
 
 def _parse_ranked_vote(text: str, valid_labels: list[str]) -> dict[str, Any]:
-    """Parse a ranked-choice vote response that includes a rankings list."""
     m = re.search(r"\{[^}]+\}", text, re.DOTALL)
     if m:
         try:
@@ -161,6 +170,37 @@ def _make_entry(
     }
 
 
+async def _do_call(
+    seat: dict[str, Any],
+    messages: list[dict[str, str]],
+    max_tokens: int | None = None,
+) -> LLMResponse:
+    """Budget-checked, hard-timeout-wrapped call_seat.
+
+    Raises BudgetExceededError or SeatError on failure.
+    """
+    if _budget_tracker is not None:
+        _budget_tracker.check()
+
+    try:
+        resp = await asyncio.wait_for(
+            call_seat(
+                seat["provider"],
+                seat["model"],
+                messages,
+                seat_id=seat.get("seat_id", 0),
+                max_tokens=max_tokens,
+            ),
+            timeout=float(_hard_latency_s),
+        )
+    except asyncio.TimeoutError as exc:
+        raise SeatError(seat.get("seat_id", 0), "timed_out") from exc
+
+    if _budget_tracker is not None:
+        _budget_tracker.record(resp.usd)
+    return resp
+
+
 # ---------------------------------------------------------------------------
 # Private LLM helpers (judge_decides and tie-break)
 # ---------------------------------------------------------------------------
@@ -193,7 +233,7 @@ async def _judge_decides(state: CouncilState, judge_seat: dict[str, Any]) -> str
             ),
         },
     ]
-    resp = await call_seat(judge_seat["provider"], judge_seat["model"], messages)
+    resp = await _do_call(judge_seat, messages)
     return resp.text
 
 
@@ -230,7 +270,7 @@ async def _judge_breaks_tie(
             ),
         },
     ]
-    resp = await call_seat(judge_seat["provider"], judge_seat["model"], messages)
+    resp = await _do_call(judge_seat, messages)
 
     valid_labels = [_draft_label(i) for i in range(len(state["drafts"]))]
     for label in reversed(valid_labels):
@@ -244,6 +284,10 @@ async def _judge_breaks_tie(
 # ---------------------------------------------------------------------------
 
 async def propose_node(state: CouncilState) -> dict[str, Any]:
+    # Short-circuit if already aborted.
+    if state.get("terminated_by"):
+        return {}
+
     seat = _seat(state["seats"], "proposer")
     round_idx = len(state["drafts"])
 
@@ -286,24 +330,58 @@ async def propose_node(state: CouncilState) -> dict[str, Any]:
         ]
 
     _emit(state["session_id"], "round_change", {"round": round_idx})
-    resp = await call_seat(seat["provider"], seat["model"], messages)
+
+    try:
+        resp = await _do_call(seat, messages)
+    except BudgetExceededError:
+        existing = state["drafts"][-1] if state["drafts"] else ""
+        abort_draft = (
+            existing + "\n\n[Council aborted — session budget reached]"
+            if existing
+            else "[Council aborted — session budget reached before first draft]"
+        )
+        return {
+            "drafts": [abort_draft],
+            "transcript": [],
+            "errored_seats": [],
+            "terminated_by": "budget_exceeded",
+            "route_decision": "vote",
+        }
+    except SeatError as exc:
+        abort_draft = (
+            state["drafts"][-1]
+            if state["drafts"]
+            else "[Council aborted — proposer seat failed to respond]"
+        )
+        return {
+            "drafts": [abort_draft] if not state["drafts"] else [],
+            "transcript": [],
+            "errored_seats": [exc.seat_id],
+            "terminated_by": "seat_error",
+            "route_decision": "vote",
+        }
+
     entry = _make_entry(state["session_id"], round_idx, seat["seat_id"], "draft", resp.text, resp)
     _emit(state["session_id"], "transcript_entry", {
         "kind": "draft", "seat_id": seat["seat_id"], "round": round_idx,
         "content": resp.text[:300],
     })
     _emit(state["session_id"], "cost_update", {"usd": resp.usd, "seat_id": seat["seat_id"]})
-    return {"drafts": [resp.text], "transcript": [entry]}
+    return {"drafts": [resp.text], "transcript": [entry], "errored_seats": []}
 
 
 async def critique_node(state: CouncilState) -> dict[str, Any]:
+    # Short-circuit if already aborted.
+    if state.get("terminated_by"):
+        return {"critiques": [[]], "transcript": []}
+
     critics = _seats_by_role(state["seats"], "critic")
     da_seats = _seats_by_role(state["seats"], "devils_advocate")
     draft = state["drafts"][-1]
     draft_label = _draft_label(len(state["drafts"]) - 1)
     round_idx = len(state["drafts"]) - 1
 
-    async def critique_one(seat: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    async def critique_one(seat: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None, int | None]:
         messages: list[dict[str, str]] = [
             {
                 "role": "system",
@@ -315,19 +393,18 @@ async def critique_node(state: CouncilState) -> dict[str, Any]:
             },
             {
                 "role": "user",
-                "content": (
-                    f"Query: {state['query']}\n\n"
-                    f"Proposer's draft ({draft_label}):\n{draft}"
-                ),
+                "content": f"Query: {state['query']}\n\nProposer's draft ({draft_label}):\n{draft}",
             },
         ]
-        resp = await call_seat(seat["provider"], seat["model"], messages)
-        entry = _make_entry(
-            state["session_id"], round_idx, seat["seat_id"], "critique", resp.text, resp
-        )
-        return resp.text, entry
+        try:
+            resp = await _do_call(seat, messages)
+        except (BudgetExceededError, SeatError) as exc:
+            seat_id = exc.seat_id if isinstance(exc, SeatError) else seat.get("seat_id", 0)
+            return None, None, seat_id
+        entry = _make_entry(state["session_id"], round_idx, seat["seat_id"], "critique", resp.text, resp)
+        return resp.text, entry, None
 
-    async def da_one(seat: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    async def da_one(seat: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None, int | None]:
         messages: list[dict[str, str]] = [
             {
                 "role": "system",
@@ -339,49 +416,63 @@ async def critique_node(state: CouncilState) -> dict[str, Any]:
             },
             {
                 "role": "user",
-                "content": (
-                    f"Query: {state['query']}\n\n"
-                    f"Proposer's draft ({draft_label}):\n{draft}"
-                ),
+                "content": f"Query: {state['query']}\n\nProposer's draft ({draft_label}):\n{draft}",
             },
         ]
-        resp = await call_seat(seat["provider"], seat["model"], messages)
-        entry = _make_entry(
-            state["session_id"], round_idx, seat["seat_id"], "dissent", resp.text, resp
-        )
-        return resp.text, entry
+        try:
+            resp = await _do_call(seat, messages)
+        except (BudgetExceededError, SeatError) as exc:
+            seat_id = exc.seat_id if isinstance(exc, SeatError) else seat.get("seat_id", 0)
+            return None, None, seat_id
+        entry = _make_entry(state["session_id"], round_idx, seat["seat_id"], "dissent", resp.text, resp)
+        return resp.text, entry, None
 
     all_tasks = [critique_one(s) for s in critics] + [da_one(s) for s in da_seats]
-    all_results = await asyncio.gather(*all_tasks)
+    all_results = list(await asyncio.gather(*all_tasks))
 
-    critic_results = list(all_results[: len(critics)])
-    da_results = list(all_results[len(critics) :])
+    critic_results = all_results[: len(critics)]
+    da_results = all_results[len(critics):]
 
-    round_critiques = [r[0] for r in critic_results]
-    entries = [r[1] for r in critic_results] + [r[1] for r in da_results]
+    round_critiques: list[str] = []
+    entries: list[dict[str, Any]] = []
+    errored: list[int] = []
 
-    for seat, (text, entry) in zip(critics, critic_results):
-        _emit(state["session_id"], "transcript_entry", {
-            "kind": "critique", "seat_id": seat["seat_id"], "round": round_idx,
-            "content": text[:300],
-        })
-    for seat, (text, entry) in zip(da_seats, da_results):
-        _emit(state["session_id"], "transcript_entry", {
-            "kind": "dissent", "seat_id": seat["seat_id"], "round": round_idx,
-            "content": text[:300],
-        })
+    for seat, (text, entry, err_id) in zip(critics, critic_results):
+        if text is not None and entry is not None:
+            round_critiques.append(text)
+            entries.append(entry)
+            _emit(state["session_id"], "transcript_entry", {
+                "kind": "critique", "seat_id": seat["seat_id"], "round": round_idx,
+                "content": text[:300],
+            })
+        elif err_id is not None:
+            errored.append(err_id)
 
-    return {"critiques": [round_critiques], "transcript": entries}
+    for seat, (text, entry, err_id) in zip(da_seats, da_results):
+        if text is not None and entry is not None:
+            entries.append(entry)
+            _emit(state["session_id"], "transcript_entry", {
+                "kind": "dissent", "seat_id": seat["seat_id"], "round": round_idx,
+                "content": text[:300],
+            })
+        elif err_id is not None:
+            errored.append(err_id)
+
+    # Web search unavailable flag is injected by agent.py before the query reaches us;
+    # if a critic text contains [search_unavailable] we preserve it as-is.
+
+    return {"critiques": [round_critiques], "transcript": entries, "errored_seats": errored}
 
 
 async def check_termination_node(state: CouncilState) -> dict[str, Any]:
-    # Round cap is checked first — no LLM calls needed.
+    # Propagate early abort set by propose_node.
+    if state.get("terminated_by"):
+        return {"route_decision": "vote"}
+
     round_cap = len(state["drafts"]) >= state["max_rounds"]
     if round_cap:
         return {"route_decision": "vote", "terminated_by": "round_cap"}
 
-    # Straw poll only makes sense after at least one revision (len >= 2),
-    # otherwise the only draft is trivially the unanimous choice.
     if len(state["drafts"]) < 2:
         return {"route_decision": "continue"}
 
@@ -400,7 +491,10 @@ async def check_termination_node(state: CouncilState) -> dict[str, Any]:
                 ),
             },
         ]
-        resp = await call_seat(seat["provider"], seat["model"], messages, max_tokens=20)
+        try:
+            resp = await _do_call(seat, messages, max_tokens=20)
+        except (BudgetExceededError, SeatError):
+            return draft_labels[-1]
         for label in reversed(draft_labels):
             if label in resp.text:
                 return label
@@ -415,9 +509,8 @@ async def check_termination_node(state: CouncilState) -> dict[str, Any]:
 
 
 async def vote_node(state: CouncilState) -> dict[str, Any]:
-    # judge_decides skips member voting entirely; synthesize_node calls the judge directly.
     if state["voting_mechanism"] == "judge_decides":
-        return {"votes": []}
+        return {"votes": [], "errored_seats": []}
 
     draft_labels = [_draft_label(i) for i in range(len(state["drafts"]))]
     is_ranked = state["voting_mechanism"] == "ranked_choice"
@@ -425,7 +518,9 @@ async def vote_node(state: CouncilState) -> dict[str, Any]:
         f"**{_draft_label(i)}**:\n{d}" for i, d in enumerate(state["drafts"])
     )
 
-    async def vote_one(seat: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    async def vote_one(
+        seat: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, int | None]:
         if is_ranked:
             messages: list[dict[str, str]] = [
                 {
@@ -463,7 +558,12 @@ async def vote_node(state: CouncilState) -> dict[str, Any]:
                     ),
                 },
             ]
-        resp = await call_seat(seat["provider"], seat["model"], messages)
+        try:
+            resp = await _do_call(seat, messages)
+        except (BudgetExceededError, SeatError) as exc:
+            seat_id = exc.seat_id if isinstance(exc, SeatError) else seat.get("seat_id", 0)
+            return None, None, seat_id
+
         parsed = (
             _parse_ranked_vote(resp.text, draft_labels)
             if is_ranked
@@ -471,43 +571,46 @@ async def vote_node(state: CouncilState) -> dict[str, Any]:
         )
         vote_dict = {"seat_id": seat["seat_id"], **parsed}
         entry = _make_entry(
-            state["session_id"],
-            len(state["drafts"]),
-            seat["seat_id"],
-            "vote",
-            resp.text,
-            resp,
+            state["session_id"], len(state["drafts"]), seat["seat_id"], "vote", resp.text, resp
         )
-        return vote_dict, entry
+        return vote_dict, entry, None
 
-    results = await asyncio.gather(*[vote_one(s) for s in state["seats"]])
-    vote_dicts = [r[0] for r in results]
-    entries = [r[1] for r in results]
+    results = list(await asyncio.gather(*[vote_one(s) for s in state["seats"]]))
 
-    for seat, (vote_dict, _) in zip(state["seats"], results):
-        _emit(state["session_id"], "transcript_entry", {
-            "kind": "vote", "seat_id": seat["seat_id"],
-            "round": len(state["drafts"]),
-            "content": f"choice={vote_dict['choice']} confidence={vote_dict.get('confidence', '?')}",
-        })
+    vote_dicts: list[dict[str, Any]] = []
+    entries: list[dict[str, Any]] = []
+    errored: list[int] = []
 
-    return {"votes": vote_dicts, "transcript": entries}
+    for seat, (vote_dict, entry, err_id) in zip(state["seats"], results):
+        if vote_dict is not None and entry is not None:
+            vote_dicts.append(vote_dict)
+            entries.append(entry)
+            _emit(state["session_id"], "transcript_entry", {
+                "kind": "vote", "seat_id": seat["seat_id"],
+                "round": len(state["drafts"]),
+                "content": f"choice={vote_dict['choice']} confidence={vote_dict.get('confidence', '?')}",
+            })
+        elif err_id is not None:
+            errored.append(err_id)
+
+    return {"votes": vote_dicts, "transcript": entries, "errored_seats": errored}
 
 
 async def synthesize_node(state: CouncilState) -> dict[str, Any]:
     mechanism = state["voting_mechanism"]
     tie_break = state.get("tie_break", "user")
 
-    # judge_decides: judge writes the verdict directly without a member vote.
     if mechanism == "judge_decides":
         judge_seat = _seat(state["seats"], "judge")
-        verdict_text = await _judge_decides(state, judge_seat)
+        try:
+            verdict_text = await _judge_decides(state, judge_seat)
+        except (BudgetExceededError, SeatError):
+            verdict_text = (
+                f"[Verdict]\n{state['drafts'][-1] if state['drafts'] else '[no draft]'}\n\n"
+                "[Council notes]\n- Mechanism: judge_decides (aborted — judge seat unavailable)"
+            )
         entry = _make_entry(
-            state["session_id"],
-            len(state["drafts"]),
-            judge_seat["seat_id"],
-            "verdict",
-            verdict_text,
+            state["session_id"], len(state["drafts"]), judge_seat["seat_id"], "verdict", verdict_text
         )
         _emit(state["session_id"], "verdict", {"text": verdict_text, "mechanism": mechanism})
         return {
@@ -518,6 +621,23 @@ async def synthesize_node(state: CouncilState) -> dict[str, Any]:
         }
 
     votes = [VotePayload(**v) for v in state["votes"]]
+    if not votes:
+        # All seats errored or budget abort — use the last draft as the verdict.
+        fallback = state["drafts"][-1] if state["drafts"] else "[no draft available]"
+        verdict_text = (
+            f"[Verdict]\n{fallback}\n\n"
+            "[Council notes]\n- Mechanism: fallback (all seats errored or budget exceeded)"
+        )
+        entry = _make_entry(
+            state["session_id"], len(state["drafts"]), 0, "verdict", verdict_text
+        )
+        _emit(state["session_id"], "verdict", {"text": verdict_text, "mechanism": "fallback"})
+        return {
+            "verdict_text": verdict_text,
+            "minority_text": None,
+            "transcript": [entry],
+            "terminated_by": state.get("terminated_by") or "all_seats_errored",
+        }
 
     if mechanism == "supermajority":
         winning_choice, is_tie = supermajority(votes)
@@ -533,7 +653,6 @@ async def synthesize_node(state: CouncilState) -> dict[str, Any]:
 
     if is_tie:
         if tie_break == "user":
-            # User tie-break UI lives in M6 (TUI) / M7 (Telegram). Return a pending state.
             pending_text = f"[Verdict]\n[TIE — awaiting user decision]\n\nTied drafts: {winning_choice}"
             entry = _make_entry(
                 state["session_id"], len(state["drafts"]), 0, "verdict", pending_text
@@ -545,9 +664,11 @@ async def synthesize_node(state: CouncilState) -> dict[str, Any]:
                 "terminated_by": "tie_user_pending",
             }
         else:
-            # "judge" or "re_deliberate" — re_deliberate defers to judge in M4.
             judge_seat = _seat(state["seats"], "judge")
-            winning_choice = await _judge_breaks_tie(state, judge_seat, votes, winning_choice)
+            try:
+                winning_choice = await _judge_breaks_tie(state, judge_seat, votes, winning_choice)
+            except (BudgetExceededError, SeatError):
+                pass  # keep the tied winner as-is
             update["terminated_by"] = "judge"
 
     draft_idx = _draft_index(winning_choice, len(state["drafts"]))
@@ -562,7 +683,6 @@ async def synthesize_node(state: CouncilState) -> dict[str, Any]:
             if v.rationale:
                 minority_concerns.append(f"Dissent (seat {v.seat_id}): {v.rationale[:200]}")
 
-    # Include Devil's Advocate dissents from the transcript.
     for e in state["transcript"]:
         if e.get("kind") == "dissent":
             try:
@@ -584,11 +704,7 @@ async def synthesize_node(state: CouncilState) -> dict[str, Any]:
 
     judge_seat = _seat(state["seats"], "judge")
     entry = _make_entry(
-        state["session_id"],
-        len(state["drafts"]),
-        judge_seat["seat_id"],
-        "verdict",
-        verdict_text,
+        state["session_id"], len(state["drafts"]), judge_seat["seat_id"], "verdict", verdict_text
     )
     _emit(state["session_id"], "verdict", {
         "text": verdict_text,
@@ -651,6 +767,9 @@ async def run_council(query: str, cfg: AppConfig) -> dict[str, Any]:
     session_id = str(uuid.uuid4())
     seats = [s.model_dump() for s in cfg.council.seats]
 
+    tracker = BudgetTracker(per_session_usd=cfg.budget.per_session_usd)
+    set_budget_tracker(tracker, hard_latency_s=cfg.budget.hard_latency_s)
+
     initial: CouncilState = {
         "session_id": session_id,
         "query": query,
@@ -663,6 +782,7 @@ async def run_council(query: str, cfg: AppConfig) -> dict[str, Any]:
         "critiques": [],
         "transcript": [],
         "votes": [],
+        "errored_seats": [],
         "verdict_text": "",
         "minority_text": None,
         "terminated_by": "",
