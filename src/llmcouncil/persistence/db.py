@@ -16,7 +16,13 @@ def build_engine(db_path: Path) -> Engine:
 
 
 def init_db(db_path: Path) -> sessionmaker[Session]:
-    """Create all tables and return a session factory."""
+    """Create all tables and return a session factory. DB file is created mode 0600."""
+    import os
+
     engine = build_engine(db_path)
     Base.metadata.create_all(engine)
+    try:
+        os.chmod(db_path, 0o600)
+    except OSError:
+        pass
     return sessionmaker(bind=engine)

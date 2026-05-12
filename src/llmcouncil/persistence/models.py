@@ -104,3 +104,32 @@ class CostLedger(Base):
     tokens_out = Column(Integer, nullable=False)
     usd = Column(Float, nullable=False)
     ts = Column(DateTime, nullable=False)
+
+
+class ShadowRun(Base):
+    """Single-LLM shadow call run alongside a council session (§26 A/B logging)."""
+
+    __tablename__ = "shadow_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(String, ForeignKey("sessions.id"), nullable=True)
+    single_llm_provider = Column(String, nullable=False)
+    single_llm_model = Column(String, nullable=False)
+    verdict_text = Column(Text, nullable=False)
+    tokens_in = Column(Integer, default=0)
+    tokens_out = Column(Integer, default=0)
+    usd = Column(Float, default=0.0)
+    latency_ms = Column(Integer, default=0)
+    created_at = Column(DateTime, nullable=False)
+
+
+class PreferencePoll(Base):
+    """User preference poll — council vs single-LLM (§26 A/B metric)."""
+
+    __tablename__ = "preference_polls"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(String, ForeignKey("sessions.id"), nullable=True)
+    asked_at = Column(DateTime, nullable=False)
+    choice = Column(String, nullable=True)   # council | single | tie | skip
+    reason = Column(Text, nullable=True)

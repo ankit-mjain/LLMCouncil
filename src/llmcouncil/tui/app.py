@@ -56,6 +56,7 @@ class CouncilTUI(App[None]):
         ("c", "show_cost", "Cost"),
         ("m", "show_memory", "Memory"),
         ("s", "pause_session", "Pause"),
+        ("v", "show_validation", "Validation"),
     ]
 
     def __init__(self, cfg: AppConfig) -> None:
@@ -202,7 +203,28 @@ class CouncilTUI(App[None]):
         )
 
     def action_show_memory(self) -> None:
-        self.notify("Memory recall not yet wired in TUI (M8).", title="Memory")
+        self.notify("Memory recall not yet wired in TUI.", title="Memory")
 
     def action_pause_session(self) -> None:
         self.notify("Session pause not yet implemented.", title="Pause")
+
+    async def action_show_validation(self) -> None:
+        try:
+            import asyncio
+
+            from llmcouncil.persistence.db import init_db
+            from llmcouncil.validation.metrics import compute_metrics, format_dashboard
+
+            db_factory = init_db(self.cfg.db_path)
+
+            def _query() -> str:
+                with db_factory() as db:
+                    return format_dashboard(compute_metrics(db))
+
+            dashboard = await asyncio.to_thread(_query)
+            # Notify shows a short excerpt; full text written to transcript log.
+            self.notify(dashboard[:400], title="Validation")
+            log = self.query_one("#transcript", RichLog)
+            log.write(f"\n[bold cyan]Validation Dashboard[/bold cyan]\n{dashboard}\n")
+        except Exception as exc:
+            self.notify(f"Validation unavailable: {exc}", title="Validation")

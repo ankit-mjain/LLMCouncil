@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
+from typing import TYPE_CHECKING, Callable, Awaitable
 
 import structlog
 
@@ -10,7 +12,25 @@ from llmcouncil.config import AppConfig
 from llmcouncil.council.llm_adapter import call_seat
 from llmcouncil.council.orchestrator import run_council
 
+if TYPE_CHECKING:
+    from sqlalchemy.orm import sessionmaker
+
 log = structlog.get_logger(__name__)
+
+# Module-level slots set by the CLI/bot at startup.
+_db_factory: "sessionmaker | None" = None
+_poll_callback: "Callable[[str], Awaitable[None]] | None" = None
+_council_session_count: int = 0
+
+
+def set_validation_db(factory: "sessionmaker | None") -> None:
+    global _db_factory
+    _db_factory = factory
+
+
+def set_poll_callback(fn: "Callable[[str], Awaitable[None]] | None") -> None:
+    global _poll_callback
+    _poll_callback = fn
 
 _CONFIDENCE_RE = re.compile(r"CONFIDENCE:\s*([\d.]+)", re.IGNORECASE)
 
@@ -57,6 +77,7 @@ async def dispatch(query: str, cfg: AppConfig, memory_context: str = "") -> str:
             council_query = f"{memory_context}\n\n---\n\n{actual}" if memory_context else actual
             log.info("council_triggered", trigger=trigger)
             state = await run_council(council_query, cfg)
+            await _post_council(actual or query, cfg)
             return str(state["verdict_text"])
 
     # Single-shot with confidence extraction.
@@ -96,9 +117,28 @@ async def dispatch(query: str, cfg: AppConfig, memory_context: str = "") -> str:
             f"{cfg.triggers.escalation_confidence_threshold:.2f}]"
         )
         state = await run_council(enriched, cfg)
+        await _post_council(query, cfg)
         return f"{notice}\n\n{state['verdict_text']}"
 
     return clean_text
+
+
+async def _post_council(query: str, cfg: AppConfig) -> None:
+    """Fire shadow run and optionally send preference poll after a council session."""
+    global _council_session_count
+    _council_session_count += 1
+
+    from llmcouncil.validation.shadow import run_shadow
+
+    asyncio.create_task(run_shadow(query, cfg, db_factory=_db_factory))
+
+    n = cfg.validation.prompt_user_for_preference_every_n
+    if _poll_callback and n > 0 and _council_session_count % n == 0:
+        msg = (
+            "Which response did you prefer?\n"
+            "Reply: /prefer council | /prefer single | /prefer tie | /prefer skip"
+        )
+        asyncio.create_task(_poll_callback(msg))
 
 
 async def start_agent(cfg: AppConfig) -> None:

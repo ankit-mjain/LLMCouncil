@@ -19,17 +19,28 @@ from llmcouncil.tui.pubsub import EventBus
 
 logger = logging.getLogger(__name__)
 
+_VALID_PREF_CHOICES = {"council", "single", "tie", "skip"}
+
 
 class CouncilBot:
     """Single-user Telegram bot with streaming council sessions."""
 
-    def __init__(self, token: str, cfg: AppConfig) -> None:
+    def __init__(
+        self,
+        token: str,
+        cfg: AppConfig,
+        db_factory: Any = None,
+    ) -> None:
         self._token = token
         self._cfg = cfg
         self._authorized_chat_id: int | None = cfg.telegram.authorized_chat_id
         self._fmt = cfg.telegram.message_format
         self._active_session: asyncio.Task[Any] | None = None
         self._pending_verdicts: deque[str] = deque()
+        self._db_factory = db_factory
+        self._council_session_count: int = 0
+        # Pending preference poll: (session_id, shadow_text)
+        self._pending_poll: tuple[str, str] | None = None
 
     # ------------------------------------------------------------------
     # Authorization
@@ -146,7 +157,54 @@ class CouncilBot:
     async def cmd_validation(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None or not self._is_authorized(update.message.chat_id):
             return
-        await update.message.reply_text("Validation stats are available in the TUI dashboard.")
+        if self._db_factory is None:
+            await update.message.reply_text("Validation DB not configured.")
+            return
+        try:
+            from llmcouncil.validation.metrics import compute_metrics, format_dashboard
+
+            metrics = await asyncio.to_thread(self._query_metrics)
+            dashboard = format_dashboard(metrics)
+        except Exception as exc:
+            await update.message.reply_text(f"Validation unavailable: {exc}")
+            return
+        for chunk in format_message(dashboard, "plain"):
+            await update.message.reply_text(chunk)
+
+    def _query_metrics(self) -> Any:
+        from llmcouncil.validation.metrics import compute_metrics
+
+        with self._db_factory() as db:
+            return compute_metrics(db)
+
+    async def cmd_prefer(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Record a preference poll response: /prefer council|single|tie|skip."""
+        if update.message is None or not self._is_authorized(update.message.chat_id):
+            return
+        choice = (context.args[0] if context.args else "").lower()
+        if choice not in _VALID_PREF_CHOICES:
+            await update.message.reply_text(
+                "Usage: /prefer council | /prefer single | /prefer tie | /prefer skip"
+            )
+            return
+        if self._db_factory is not None:
+            await asyncio.to_thread(self._record_preference, choice)
+        self._pending_poll = None
+        await update.message.reply_text(f"Preference recorded: {choice}. Thank you!")
+
+    def _record_preference(self, choice: str, session_id: str = "") -> None:
+        from datetime import datetime, timezone
+
+        from llmcouncil.persistence.models import PreferencePoll
+
+        with self._db_factory() as db:
+            poll = PreferencePoll(
+                session_id=session_id or None,
+                asked_at=datetime.now(timezone.utc),
+                choice=choice,
+            )
+            db.add(poll)
+            db.commit()
 
     # ------------------------------------------------------------------
     # Session runner with streaming status updates
@@ -180,6 +238,27 @@ class CouncilBot:
 
         poll_task.cancel()
         set_event_bus(None)
+
+        # Fire shadow run for A/B logging.
+        self._council_session_count += 1
+        if self._cfg.validation.ab_logging:
+            from llmcouncil.validation.shadow import run_shadow
+
+            asyncio.create_task(
+                run_shadow(query, self._cfg, db_factory=self._db_factory)
+            )
+
+        # Send preference poll every N sessions.
+        n = self._cfg.validation.prompt_user_for_preference_every_n
+        if n > 0 and self._council_session_count % n == 0:
+            try:
+                await self._send_with_retry(
+                    chat_id,
+                    "Which response did you prefer?\n"
+                    "Reply: /prefer council | /prefer single | /prefer tie | /prefer skip",
+                )
+            except Exception:
+                pass
 
         chunks = format_message(verdict, self._fmt)
         for chunk in chunks:
@@ -277,6 +356,7 @@ class CouncilBot:
         app.add_handler(CommandHandler("cancel", self.cmd_cancel))
         app.add_handler(CommandHandler("transcript", self.cmd_transcript))
         app.add_handler(CommandHandler("validation", self.cmd_validation))
+        app.add_handler(CommandHandler("prefer", self.cmd_prefer))
 
         delay = 1.0
         while True:
