@@ -4,7 +4,7 @@
 
 ---
 
-## Current milestone: M8 (not started)
+## Current milestone: M9 (not started)
 
 ---
 
@@ -20,8 +20,37 @@
 | **M5** | Web search tool; cross-conversation memory; auto-escalation | **DONE** | Memory recall + escalation observable in TUI |
 | **M6** | TUI dashboard (live + history) | **DONE** | Live streaming visible during a council session |
 | **M7** | Telegram streaming; markdown/rich formats; budget enforcement; failure modes | **DONE** | All §19 failures handled; budgets enforced |
-| **M8** | Hardening: structured logs, security review, docs; validation harness active | **TODO** | Security review passed; README; first 30 days of validation data |
+| **M8** | Hardening: structured logs, security review, docs; validation harness active | **DONE** | Security review passed; README; first 30 days of validation data |
 | **M9** | v1 → v2 pivot trigger met; begin CSV pipeline spec | **TODO** | v2.0 spec drafted and approved |
+
+---
+
+## M8 — completed 2026-05-12
+
+### What was built
+
+| File | Purpose |
+|---|---|
+| `src/llmcouncil/logging.py` | `init_logging()` — structlog JSON-lines to `logs_dir/llmcouncil.jsonl` (0640); `_redact_secrets` processor strips API keys, bot tokens, Tavily keys |
+| `src/llmcouncil/persistence/db.py` | `init_db()` now chmods DB file to 0600 after `create_all()` |
+| `src/llmcouncil/persistence/models.py` | `ShadowRun` and `PreferencePoll` tables (§26 A/B logging) |
+| `src/llmcouncil/tools/web_search.py` | `_INJECTION_GUARD` prefix on all search results — seats treat web content as untrusted |
+| `src/llmcouncil/validation/shadow.py` | `run_shadow()` — background single-LLM call after each council session; persists to `shadow_runs` |
+| `src/llmcouncil/validation/metrics.py` | `compute_metrics()` + `format_dashboard()` — §26.5 validation dashboard from DB |
+| `src/llmcouncil/agent.py` | `_post_council()` — fires shadow run + preference poll every N sessions; `set_validation_db()` / `set_poll_callback()` |
+| `src/llmcouncil/telegram/bot.py` | `/validation` renders live §26.5 dashboard; `/prefer` records poll choice; shadow run + poll trigger in `_run_session` |
+| `src/llmcouncil/tui/app.py` | `v` key → `action_show_validation` — async DB query + dashboard in transcript log |
+| `README.md` | User-facing docs: install, first run, commands, architecture, security |
+| `tests/unit/test_logging.py` | 9 tests — redaction patterns, `init_logging` file creation + permissions |
+| `tests/unit/test_security.py` | 5 tests — DB 0600, idempotent init, injection guard present/absent |
+| `tests/unit/test_shadow.py` | 5 tests — disabled, success, failure, DB persist, DB skip |
+| `tests/unit/test_metrics.py` | 8 tests — empty DB, days logged, preference counts, disagreement, dashboard format, pivot trigger |
+| `tests/unit/test_validation_bot.py` | 6 tests — /validation no-DB, /validation with DB, /prefer valid/invalid/DB, poll trigger |
+
+### Test results
+```
+183 passed in 27.68s
+```
 
 ---
 
