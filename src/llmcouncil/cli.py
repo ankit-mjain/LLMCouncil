@@ -92,9 +92,14 @@ def vault_set(
 @app.command("vault-get")
 def vault_get(
     key: str = typer.Argument(..., help="Secret key name."),
+    show: bool = typer.Option(False, "--show", help="Print the full secret value to stdout (plaintext)."),
     config: Path = typer.Option(_DEFAULT_CONFIG_FILE, "--config", "-c"),
 ) -> None:
-    """Retrieve a secret from the vault (prints to stdout)."""
+    """Check whether a secret exists in the vault (redacted by default).
+
+    Use --show to print the full plaintext value. This will be visible in
+    your shell history, process list, and any log capture tools.
+    """
     cfg = _load_or_default(config)
     from llmcouncil.adapters.vault import build_vault
 
@@ -103,7 +108,13 @@ def vault_get(
     if value is None:
         console.print(f"[yellow]Secret '{key}' not found.[/yellow]")
         raise typer.Exit(1)
-    typer.echo(value)
+    if show:
+        console.print(f"[yellow]WARNING: printing secret in plaintext.[/yellow]")
+        typer.echo(value)
+    else:
+        redacted = value[:2] + "*" * max(0, len(value) - 6) + value[-4:] if len(value) > 6 else "****"
+        console.print(f"Secret '{key}' exists. Value (redacted): [dim]{redacted}[/dim]")
+        console.print("[dim]Use --show to print the full value.[/dim]")
 
 
 @app.command("vault-delete")

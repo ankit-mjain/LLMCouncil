@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -79,7 +80,12 @@ def _ping_provider(provider: str, model: str, api_key: str | None) -> tuple[bool
         litellm.completion(**kwargs)
         return True, "OK"
     except Exception as exc:  # noqa: BLE001
-        return False, str(exc)
+        msg = re.sub(
+            r"(sk-|ant-|tvly-|bot\d+:)[A-Za-z0-9\-_]{10,}",
+            "[REDACTED]",
+            str(exc),
+        )
+        return False, msg
 
 
 # ---------------------------------------------------------------------------
@@ -242,8 +248,12 @@ class SetupWizard:
                     password=True,
                 )
                 if self._vault:
-                    self._vault.set(f"{provider.upper()}_API_KEY", api_key)
-                    console.print(f"[green]Key stored in vault.[/green]")
+                    try:
+                        self._vault.set(f"{provider.upper()}_API_KEY", api_key)
+                        console.print("[green]Key stored in vault.[/green]")
+                    except VaultError as exc:
+                        console.print(f"[red]Failed to store API key in vault: {exc}[/red]")
+                        raise SystemExit(1)
             else:
                 api_key = None
 
@@ -507,9 +517,16 @@ class SetupWizard:
             default="",
             password=True,
         )
-        if bot_token and self._vault:
-            self._vault.set("TELEGRAM_BOT_TOKEN", bot_token)
-            console.print("[green]Bot token stored in vault.[/green]")
+        if bot_token:
+            if not self._vault:
+                console.print("[red]ERROR: Vault not initialized. Cannot store bot token.[/red]")
+                raise SystemExit(1)
+            try:
+                self._vault.set("TELEGRAM_BOT_TOKEN", bot_token)
+                console.print("[green]Bot token stored in vault.[/green]")
+            except VaultError as exc:
+                console.print(f"[red]Failed to store bot token in vault: {exc}[/red]")
+                raise SystemExit(1)
 
         fmt = _choose(
             "Message format",
@@ -598,8 +615,12 @@ class SetupWizard:
                     default="",
                 )
                 if search_key and self._vault:
-                    self._vault.set(f"{provider.upper()}_API_KEY", search_key)
-                    console.print("[green]Search key stored in vault.[/green]")
+                    try:
+                        self._vault.set(f"{provider.upper()}_API_KEY", search_key)
+                        console.print("[green]Search key stored in vault.[/green]")
+                    except VaultError as exc:
+                        console.print(f"[red]Failed to store search key in vault: {exc}[/red]")
+                        raise SystemExit(1)
             max_calls = IntPrompt.ask(
                 "Max web search calls per council session",
                 default=self.cfg.web_search.max_calls_per_session,

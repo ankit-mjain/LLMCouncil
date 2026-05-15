@@ -50,15 +50,28 @@ class AgeVault(BaseVault):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _check_identity(self) -> None:
+        """Verify the identity file exists and has mode 0600 before any vault operation."""
+        if not self._id_path.exists():
+            raise VaultError(f"Identity file not found: {self._id_path}")
+        mode = self._id_path.stat().st_mode & 0o777
+        if mode != 0o600:
+            raise VaultError(
+                f"Identity file {self._id_path} has insecure permissions {oct(mode)}. "
+                "Expected 0o600. Fix with: chmod 600 " + str(self._id_path)
+            )
+
     def _load_identity(self) -> object:
         try:
             import pyrage
         except ImportError as exc:
             raise VaultError("pyrage is not installed. Run: uv pip install pyrage") from exc
+        self._check_identity()
         pem = self._id_path.read_text().strip()
         return pyrage.x25519.Identity.from_str(pem)
 
     def _decrypt(self) -> dict[str, str]:
+        self._check_identity()
         if not self._enc_path.exists():
             return {}
         try:

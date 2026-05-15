@@ -60,3 +60,29 @@ def test_build_vault_age(tmp_path: Path) -> None:
 def test_build_vault_unknown_raises() -> None:
     with pytest.raises(VaultError, match="Unknown vault backend"):
         build_vault("hashicorp", Path("/tmp"))
+
+
+# ---------------------------------------------------------------------------
+# Identity file permission checks (HIGH-002)
+# ---------------------------------------------------------------------------
+
+def test_load_identity_rejects_insecure_permissions(tmp_path: Path) -> None:
+    id_path = tmp_path / "age.key"
+    AgeVault.generate_identity(id_path)
+    id_path.chmod(0o644)  # deliberately weaken permissions
+    enc_path = tmp_path / "secrets.age"
+    vault = AgeVault(encrypted_path=enc_path, identity_path=id_path)
+    with pytest.raises(VaultError, match="insecure permissions"):
+        vault.get("ANY_KEY")
+
+
+def test_load_identity_accepts_correct_permissions(age_vault: AgeVault) -> None:
+    age_vault.set("KEY", "value")
+    assert age_vault.get("KEY") == "value"
+
+
+def test_load_identity_raises_when_file_missing(tmp_path: Path) -> None:
+    enc_path = tmp_path / "secrets.age"
+    vault = AgeVault(encrypted_path=enc_path, identity_path=tmp_path / "missing.key")
+    with pytest.raises(VaultError, match="not found"):
+        vault.get("ANY_KEY")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 import tomli_w
 from pathlib import Path
@@ -23,12 +24,25 @@ class CostProfileConfig(BaseModel):
     preset: Literal["free", "cheap", "balanced", "premium", "custom"] = "cheap"
 
 
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-_./:@]*$")
+
+
 class SeatConfig(BaseModel):
     seat_id: int
     role: Literal["proposer", "critic", "devils_advocate", "judge"]
     provider: str
     model: str
     weight: float = 1.0
+
+    @field_validator("provider", "model")
+    @classmethod
+    def _validate_name(cls, v: str) -> str:
+        if not _NAME_RE.match(v):
+            raise ValueError(
+                f"Invalid characters in provider/model name: {v!r}. "
+                "Only alphanumeric, hyphens, underscores, dots, slashes, colons, and @ are allowed."
+            )
+        return v
 
 
 class CouncilConfig(BaseModel):

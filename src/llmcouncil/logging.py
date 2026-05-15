@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -54,5 +55,8 @@ def init_logging(logs_dir: Path, level: str = "INFO") -> None:
 
     try:
         os.chmod(log_file, 0o640)
-    except OSError:
-        pass
+    except OSError as e:
+        print(
+            f"WARNING: Failed to set log file permissions on {log_file}: {e}",
+            file=sys.stderr,
+        )

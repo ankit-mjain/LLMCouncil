@@ -17,7 +17,13 @@ import operator
 from langgraph.graph import StateGraph, END
 
 from llmcouncil.config import AppConfig
-from llmcouncil.council.budget import BudgetExceededError, BudgetTracker
+from llmcouncil.council.budget import (
+    BudgetExceededError,
+    BudgetTracker,
+    DailyBudgetExceededError,
+    check_daily_budget,
+    record_daily_spend,
+)
 from llmcouncil.council.llm_adapter import LLMResponse, SeatError, call_seat
 from llmcouncil.tui.events import CouncilEvent
 from llmcouncil.tui.pubsub import EventBus
@@ -764,6 +770,8 @@ def build_council_graph() -> Any:
 
 async def run_council(query: str, cfg: AppConfig) -> dict[str, Any]:
     """Convene a council session and return the final graph state."""
+    check_daily_budget(cfg.budget.per_day_usd)
+
     session_id = str(uuid.uuid4())
     seats = [s.model_dump() for s in cfg.council.seats]
 
@@ -792,4 +800,5 @@ async def run_council(query: str, cfg: AppConfig) -> dict[str, Any]:
 
     graph = build_council_graph()
     result: dict[str, Any] = await graph.ainvoke(initial)
+    record_daily_spend(tracker.spent)
     return result

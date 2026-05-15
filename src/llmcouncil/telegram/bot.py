@@ -7,6 +7,8 @@ import logging
 from collections import deque
 from typing import Any
 
+_MAX_QUERY_LEN = 5_000  # characters; prevents context-window stuffing and runaway costs
+
 from telegram import Bot, Message, Update
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
@@ -34,6 +36,7 @@ class CouncilBot:
         self._token = token
         self._cfg = cfg
         self._authorized_chat_id: int | None = cfg.telegram.authorized_chat_id
+        self._auth_lock: asyncio.Lock = asyncio.Lock()
         self._fmt = cfg.telegram.message_format
         self._active_session: asyncio.Task[Any] | None = None
         self._pending_verdicts: deque[str] = deque()
@@ -62,16 +65,17 @@ class CouncilBot:
             return
         chat_id = update.message.chat_id
 
-        if self._authorized_chat_id is None:
-            self._authorize(chat_id)
-            await update.message.reply_text(
-                "Pairing complete. This chat is now authorized to use LLMCouncil.\n"
-                "Send /help to see available commands."
-            )
-        elif chat_id == self._authorized_chat_id:
-            await update.message.reply_text("Already paired. Send /help for commands.")
-        else:
-            await update.message.reply_text("This bot is already paired with another user.")
+        async with self._auth_lock:
+            if self._authorized_chat_id is None:
+                self._authorize(chat_id)
+                await update.message.reply_text(
+                    "Pairing complete. This chat is now authorized to use LLMCouncil.\n"
+                    "Send /help to see available commands."
+                )
+            elif chat_id == self._authorized_chat_id:
+                await update.message.reply_text("Already paired. Send /help for commands.")
+            else:
+                await update.message.reply_text("This bot is already paired with another user.")
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None or not self._is_authorized(update.message.chat_id):
@@ -94,6 +98,11 @@ class CouncilBot:
         query = " ".join(context.args or []).strip()
         if not query:
             await update.message.reply_text("Usage: /Council <your question>")
+            return
+        if len(query) > _MAX_QUERY_LEN:
+            await update.message.reply_text(
+                f"Query too long ({len(query)} characters). Maximum is {_MAX_QUERY_LEN} characters."
+            )
             return
         if self._active_session and not self._active_session.done():
             await update.message.reply_text(
@@ -229,7 +238,9 @@ class CouncilBot:
             return
         except Exception as exc:
             logger.exception("Council session failed")
-            await status_msg.edit_text(f"Council error: {exc}")
+            await status_msg.edit_text(
+                "Council session failed. Check logs for details."
+            )
             poll_task.cancel()
             set_event_bus(None)
             return

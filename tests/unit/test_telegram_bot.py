@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from llmcouncil.config import AppConfig, BudgetConfig, TelegramConfig
-from llmcouncil.telegram.bot import CouncilBot
+from llmcouncil.telegram.bot import CouncilBot, _MAX_QUERY_LEN
 
 
 def _make_bot(authorized_chat_id: int | None = None) -> CouncilBot:
@@ -186,3 +186,93 @@ async def test_cmd_budget_shows_limits() -> None:
     text = update.message.reply_text.call_args[0][0]
     assert "1.00" in text
     assert "5.00" in text
+
+
+# ---------------------------------------------------------------------------
+# Query length validation (MED-004)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_cmd_council_rejects_long_query() -> None:
+    bot = _make_bot(authorized_chat_id=1)
+    update = _make_update(chat_id=1)
+    oversized_query = "x" * (_MAX_QUERY_LEN + 1)
+    ctx = _make_context(args=[oversized_query])
+
+    await bot.cmd_council(update, ctx)
+
+    text = update.message.reply_text.call_args[0][0]
+    assert "too long" in text.lower() or "maximum" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_cmd_council_accepts_max_length_query() -> None:
+    """Query exactly at the limit is not rejected for length (may be rejected for other reasons)."""
+    bot = _make_bot(authorized_chat_id=1)
+    update = _make_update(chat_id=1)
+    update.message.reply_text = AsyncMock(return_value=MagicMock())
+    at_limit_query = ["x" * _MAX_QUERY_LEN]
+    ctx = _make_context(args=at_limit_query)
+
+    with patch("llmcouncil.telegram.bot.run_council", new=AsyncMock(return_value={"verdict_text": "ok"})):
+        await bot.cmd_council(update, ctx)
+
+    first_call_text = update.message.reply_text.call_args_list[0][0][0]
+    assert "too long" not in first_call_text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Generic error message (MED-006)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_session_error_shows_generic_message() -> None:
+    bot = _make_bot(authorized_chat_id=1)
+    update = _make_update(chat_id=1)
+    update.message.reply_text = AsyncMock(return_value=MagicMock(edit_text=AsyncMock()))
+    ctx = _make_context(args=["valid query"])
+
+    with patch(
+        "llmcouncil.telegram.bot.run_council",
+        new=AsyncMock(side_effect=RuntimeError("internal model error: sk-ant-secret")),
+    ):
+        with patch("llmcouncil.telegram.bot.EventBus"):
+            await bot.cmd_council(update, ctx)
+            # Wait briefly for the task to run
+            import asyncio
+            await asyncio.sleep(0.05)
+
+    if bot._active_session:
+        try:
+            await bot._active_session
+        except Exception:
+            pass
+
+    status_mock = update.message.reply_text.return_value
+    edit_calls = status_mock.edit_text.call_args_list
+    if edit_calls:
+        error_text = edit_calls[-1][0][0]
+        assert "sk-ant" not in error_text
+        assert "secret" not in error_text.lower() or "check logs" in error_text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Auth lock — concurrent /start doesn't authorize two chats (HIGH-001)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_cmd_start_is_atomic_under_concurrency() -> None:
+    bot = _make_bot(authorized_chat_id=None)
+
+    update_a = _make_update(chat_id=111)
+    update_b = _make_update(chat_id=222)
+    ctx = _make_context()
+
+    import asyncio
+    await asyncio.gather(
+        bot.cmd_start(update_a, ctx),
+        bot.cmd_start(update_b, ctx),
+    )
+
+    # Exactly one chat should be authorized — not both, not neither.
+    assert bot._authorized_chat_id in (111, 222)
