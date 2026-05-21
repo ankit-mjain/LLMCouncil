@@ -51,6 +51,24 @@ uv sync
 
 ---
 
+## Production install
+
+Install once with [pipx](https://pipx.pypa.io), which isolates the package and puts `llmcouncil` on your `PATH`:
+
+```bash
+pipx install git+https://github.com/ankitjain/LLMCouncil
+```
+
+After that, run without `uv` or any virtualenv activation:
+
+```bash
+llmcouncil setup
+llmcouncil run
+llmcouncil tui
+```
+
+---
+
 ## First run
 
 ```bash
